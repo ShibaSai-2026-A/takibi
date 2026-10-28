@@ -1,0 +1,33 @@
+# 配布ZIPと制作途中のテンプレートは、ソース管理に含めない。
+/*.zip
+/_template/
+/BonfireUnity/Assets/_Recovery/
+/BonfireUnity/Assets/_Recovery.meta
+*.log
+
+# Unityが再生成するキャッシュ・個人用設定。
+**/[Ll]ibrary/
+**/[Tt]emp/
+**/[Oo]bj/
+**/[Ll]ogs/
+**/[Uu]ser[Ss]ettings/
+**/[Bb]uild/
+**/[Bb]uilds/
+**/.vs/
+**/.idea/
+*.csproj
+*.sln
+*.slnx
+*.user
+*.pidb
+*.pdb
+
+# ローカルの資格情報とOSの補助ファイル。
+.env
+.env.*
+!.env.example
+*.pfx
+*.p12
+*.keystore
+Thumbs.db
+.DS_Store

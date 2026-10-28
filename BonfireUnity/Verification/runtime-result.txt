@@ -1,0 +1,6 @@
+Unity 6000.4.4f1
+Graphics: NVIDIA GeForce RTX 5060 Laptop GPU
+API: Direct3D11
+C# compiled; scene/material generation; scene object construction; shader error checks; 1280x720 Editor render requests passed.
+Envelope fixed-step assertions passed: 7 seconds growth=0.9763649, 12 seconds decay=0
+Play mode, USB microphone, keyboard hardware, projector, standalone build and 60fps are not verified by this run.
