@@ -6,7 +6,7 @@ namespace InteractiveBonfire
     // 音声は録音ファイルに保存せず、直近のサンプルだけを解析する。
     public sealed class BreathMicrophone : MonoBehaviour
     {
-        [Tooltip("空欄なら既定。USBマイク名の一部でも指定できます")]
+        [Tooltip("空欄なら一覧の先頭。USBマイク名の一部を指定すると、その機器だけを使用します")]
         public string deviceNameContains = "";
         public bool useMicrophone = true;
         [Range(0.0001f, 0.3f)] public float noiseGate = 0.012f;
@@ -14,6 +14,8 @@ namespace InteractiveBonfire
         [Range(0.1f, 8f)] public float sensitivity = 1f;
         [Range(0.01f, 0.5f)] public float attackSeconds = 0.08f;
         [Range(0.05f, 1f)] public float releaseSeconds = 0.25f;
+        [Tooltip("短い物音を弾くため、ゲートを超える入力がこの秒数続いてから反応します")]
+        [Range(0f, 1f)] public float minimumInputSeconds = 0.18f;
         [Tooltip("解析値。実行中のInspectorで確認")]
         public float rms;
         public float breath;
@@ -22,6 +24,7 @@ namespace InteractiveBonfire
         AudioClip clip;
         float[] samples;
         bool gateOpen;
+        float inputDuration;
         float calibrationTime, calibrationSum;
         int calibrationCount;
         float lastPositionTime;
@@ -88,19 +91,23 @@ namespace InteractiveBonfire
                         rms = Mathf.Sqrt((float)(power / samples.Length));
                         status = "入力中: " + activeDevice;
                         gateOpen = rms > noiseGate * (gateOpen ? 0.75f : 1.1f);
-                        if (gateOpen) target = Mathf.Clamp01((rms - noiseGate * 0.75f) / Mathf.Max(0.001f, fullBreathRms - noiseGate * 0.75f) * sensitivity);
+                        // 別のマイクを混ぜず、選択した機器の持続入力だけを採用する。
+                        inputDuration = gateOpen ? inputDuration + Time.unscaledDeltaTime : 0f;
+                        if (gateOpen && inputDuration >= minimumInputSeconds)
+                            target = Mathf.Clamp01((rms - noiseGate * 0.75f) / Mathf.Max(0.001f, fullBreathRms - noiseGate * 0.75f) * sensitivity);
                         if (calibrationTime > 0f)
                         {
                             calibrationTime -= Time.unscaledDeltaTime;
                             calibrationSum += rms; calibrationCount++;
-                            target = 0; status = "無音測定中・息を吹かないでください";
+                            target = 0; gateOpen = false; inputDuration = 0;
+                            status = "周囲の音を測定中・息を吹かないでください";
                             if (calibrationTime <= 0) noiseGate = Mathf.Clamp(calibrationSum / Mathf.Max(1, calibrationCount) * 2.5f + 0.002f, 0.002f, 0.25f);
                         }
                     }
                 }
-                else { rms = 0; status = fresh ? "マイク起動待ち" : "入力停止・権限やUSB接続を確認"; }
+                else { rms = 0; gateOpen = false; inputDuration = 0; status = fresh ? "マイク起動待ち" : "入力停止・権限やUSB接続を確認"; }
             }
-            else rms = 0;
+            else { rms = 0; gateOpen = false; inputDuration = 0; }
             breath = Mathf.Lerp(breath, target, 1f - Mathf.Exp(-Time.unscaledDeltaTime / (target > breath ? attackSeconds : releaseSeconds)));
         }
 
@@ -109,6 +116,7 @@ namespace InteractiveBonfire
             if (clip && !string.IsNullOrEmpty(activeDevice)) Microphone.End(activeDevice);
             if (clip) Destroy(clip);
             clip = null; samples = null; breath = rms = 0; gateOpen = false;
+            inputDuration = 0; calibrationTime = 0;
         }
         void OnDisable() { StopMicrophone(); }
     }
