@@ -1,0 +1,8 @@
+Unity 6000.4.4f1
+GPU NVIDIA GeForce RTX 5060 Laptop GPU
+C# compilation and flame shader check passed.
+Animation phase remains continuous across energy/breath changes.
+GPU advected density/temperature: 64x96x48 cells, two ARGBHalf textures.
+48 Editor render-request frames at 960x540, 6.5 seconds warm-up then 3.133 seconds advance (15 fps preview).
+Additional 4-second simulations at energy 0.12, 0.35, 0.65.
+This is an offline preview; live Play, USB input, 1080p/60fps and projector output remain unverified.

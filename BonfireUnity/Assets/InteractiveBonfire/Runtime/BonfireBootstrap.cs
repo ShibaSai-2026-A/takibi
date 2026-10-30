@@ -11,6 +11,8 @@ namespace InteractiveBonfire
         public bool microphoneEnabled = true;
         public int initialRaySteps = 64;
         [Range(0.3f,2f)] public float initialDensity = 1f;
+        [Range(0.25f,2f)] public float initialMotionSpeed = 1f;
+        [Range(0.2f,1.8f)] public float initialTurbulenceStrength = 1f;
         public bool exhibitionFullscreen = true;
         public BonfireController Controller { get; private set; }
         public Camera ViewCamera { get; private set; }
@@ -56,7 +58,8 @@ namespace InteractiveBonfire
             box.GetComponent<MeshRenderer>().sharedMaterial=flameMaterial;
             box.GetComponent<MeshRenderer>().shadowCastingMode=ShadowCastingMode.Off;
             var volume=box.AddComponent<BonfireVolume>(); volume.material=flameMaterial; volume.raySteps=initialRaySteps; volume.density=initialDensity;
-            // Awake後にも反映できるよう、sourcesはUpdateSources経由で設定。
+            volume.motionSpeed=initialMotionSpeed; volume.turbulenceStrength=initialTurbulenceStrength;
+            // 火点は薪の隙間に固定。wは移流版では熱量差、手続き版では相対高さに使用。
             volume.SetSources(new [] {
                 new Vector4(0f,0.40f,0.08f,1.0f), new Vector4(-0.38f,0.23f,-0.06f,0.72f),
                 new Vector4(0.38f,0.25f,0.06f,0.62f), new Vector4(-0.16f,0.26f,-0.29f,0.66f),

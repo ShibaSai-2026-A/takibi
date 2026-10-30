@@ -1,0 +1,7 @@
+{
+  "frames": 48,
+  "preview_fps": 15,
+  "minimum_mean_absolute_frame_difference": 0.001099476519002663,
+  "maximum_mean_absolute_frame_difference": 0.0015048742233518921,
+  "note": "Differences confirm changing rendered frames, not photorealism or realtime performance."
+}

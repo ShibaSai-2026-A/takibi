@@ -27,11 +27,13 @@ Shader "InteractiveBonfire/VolumeFlame"
             #include "Packages/com.unity.render-pipelines.universal/ShaderLibrary/Core.hlsl"
             #include "Packages/com.unity.render-pipelines.universal/ShaderLibrary/DeclareDepthTexture.hlsl"
             TEXTURE3D(_NoiseTex); SAMPLER(sampler_NoiseTex);
+            TEXTURE3D(_SimTex); SAMPLER(sampler_SimTex);
             CBUFFER_START(UnityPerMaterial)
-            float _Energy, _Breath, _Exposure, _Density, _AnimationTime;
+            float _Energy, _Breath, _Exposure, _Density, _AnimationTime, _MotionStrength, _UseSimulation;
             int _Steps;
             CBUFFER_END
             float4 _Sources[7];
+            float4 _SourceMotion[7];
             struct Attributes { float4 positionOS : POSITION; };
             struct Varyings { float4 positionCS : SV_POSITION; float3 positionWS : TEXCOORD0; };
             Varyings Vert(Attributes v)
@@ -39,32 +41,73 @@ Shader "InteractiveBonfire/VolumeFlame"
                 Varyings o; o.positionWS = TransformObjectToWorld(v.positionOS.xyz);
                 o.positionCS = TransformWorldToHClip(o.positionWS); return o;
             }
-            float N(float3 p) { return SAMPLE_TEXTURE3D_LOD(_NoiseTex, sampler_NoiseTex, p / 48.0, 0).r; }
+            float N(float3 p)
+            {
+                // 補間の速度も格子境界でつなぎ、炎の方向がカクッと変わるのを抑える。
+                float3 cell = floor(p), f = frac(p);
+                f = f*f*f*(f*(f*6.0-15.0)+10.0);
+                return SAMPLE_TEXTURE3D_LOD(_NoiseTex, sampler_NoiseTex, (cell+f+0.5)/48.0, 0).r;
+            }
             // 時間とともに上昇する連続ノイズ。格子を切り替えない。
             float Turbulence(float3 p) { return N(p) * 0.58 + N(p * 2.07 + 7.3) * 0.28 + N(p * 4.13 - 9.1) * 0.14; }
             float Field(float3 p, out float heat, out float height)
             {
+                if(_UseSimulation>0.5)
+                {
+                    float3 uv=(p-float3(-1.55,-0.15,-1.1))/float3(3.1,3.6,2.2);
+                    float2 gas=SAMPLE_TEXTURE3D_LOD(_SimTex,sampler_SimTex,uv,0).rg;
+                    // グリッドは大きな流れを担当し、細い反応膜は高解像度のノイズで補う。
+                    float3 detailFlow=p*float3(7.5,4.2,8.5)-float3(0.13*_AnimationTime,3.6*_AnimationTime,-0.11*_AnimationTime);
+                    float detail=N(detailFlow)*0.65+N(detailFlow*2.13+17.2)*0.35;
+                    float strands=N(p*float3(17,3.2,19)-float3(0.09*_AnimationTime,2.8*_AnimationTime,0.06*_AnimationTime));
+                    height=saturate((p.y-0.25)/2.5);
+                    heat=saturate(0.12+gas.y*0.68+strands*0.20);
+                    float reaction=smoothstep(0.14,0.29,gas.y*(0.70+detail*0.65));
+                    float tissue=gas.x*(0.50+detail*1.15);
+                    float membrane=exp(-abs(tissue-0.34)*8.0)*smoothstep(0.045,0.19,gas.x);
+                    return (membrane*(0.70+strands*0.30)+gas.x*0.045)*reaction;
+                }
                 float t = _AnimationTime;
-                float3 flow = p * float3(3.7, 2.7, 4.5) - float3(0.12*t, t*(1.9+_Energy*1.6), -0.17*t);
+                // 高さに対して時間を遅らせ、根元の変化が上部へ運ばれる流れを作る。
+                float3 flow = p * float3(3.4, 2.8, 4.0) - float3(0.08*t, 2.1*t, -0.06*t);
                 float3 warp = float3(N(flow+12.8), N(flow+26.2), N(flow+43.7)) - 0.5;
                 float rise = saturate((p.y - 0.13) / 2.7);
                 float3 q = p;
-                q.xz += warp.xz * (0.13 + rise * (0.7 + _Breath * 0.15));
-                q.x += sin(p.y*3.9-t*2.2)*rise*0.10;
+                float rootAnchor = smoothstep(0.16,0.72,p.y);
+                float2 broadBend = float2(N(float3(7.1,p.y*1.3-t*0.72,2.4)),N(float3(23.7,p.y*1.1-t*0.63,19.2)))-0.5;
+                q.xz += rootAnchor * _MotionStrength * (broadBend*0.24 + warp.xz*(0.12+rise*0.32+_Breath*0.06));
                 float field = 0;
                 height = 0;
                 [unroll] for (int j=0; j<7; j++)
                 {
                     float4 s = _Sources[j];
+                    float4 motion = _SourceMotion[j];
                     float activation = j == 0 ? smoothstep(0.005,0.12,_Energy) : smoothstep(0.10+j*0.035,0.40+j*0.055,_Energy);
                     float h = (0.10 + 2.5*pow(_Energy,0.78)) * s.w;
-                    h *= 0.83 + 0.24*N(float3(j*6.3, t*1.35, 3.1));
-                    float y = (q.y-s.y) / max(0.05,h);
-                    float gate = smoothstep(-0.04,0.04,y) * (1-smoothstep(0.72,1.02,y));
+                    h *= motion.x;
+                    float aboveRoot = q.y-s.y;
+                    float y = aboveRoot / max(0.05,h);
+                    float gate = smoothstep(-0.04,0.04,y) * (1-smoothstep(0.80,1.06,y));
                     float r = (0.10 + 0.115*_Energy) * pow(saturate(1-y),0.72) + 0.012;
-                    float2 center = s.xz + float2(sin(y*6.0-t*1.6+j),cos(y*4.2-t*1.3+j*1.8)) * y*y * (0.07+0.12*_Energy);
+                    // 流れはワールド空間の高さで評価する。火力が変わっても既存の炎を縦に引き伸ばさない。
+                    float age = aboveRoot*2.15-t*(1.15+j*0.047);
+                    float2 localFlow = float2(N(float3(j*7.3,age,9.2)),N(float3(j*7.3+21.4,age*0.91,31.7)))-0.5;
+                    float neck = N(float3(j*5.19+4.7,aboveRoot*3.05-t*(1.52+j*0.033),42.3));
+                    r *= motion.y * (0.82+0.32*neck);
+                    float2 center = s.xz + localFlow * pow(saturate(aboveRoot/1.8),1.45) * (0.22+0.18*_Energy) * _MotionStrength;
                     float2 d = (q.xz-center)/float2(r,r*0.72);
-                    field += exp(-dot(d,d)*1.65) * gate * activation;
+                    // 上部だけにくびれを通すことで、先端が細まり、離れて消える。
+                    float breakup = lerp(1.0,smoothstep(0.19,0.52,neck),smoothstep(0.43,0.95,y));
+                    float core = exp(-dot(d,d)*1.65);
+                    // 分岐は常設の柱にせず、移流する短い反応帯にだけ生じさせる。
+                    float branchGate = smoothstep(0.28,0.55,y)*(1-smoothstep(0.83,1.02,y));
+                    float2 forkCenter = center + float2(motion.w*(0.055+0.095*y),localFlow.y*0.06);
+                    float2 forkD = (q.xz-forkCenter)/float2(r*0.58,r*0.48);
+                    float fork = exp(-dot(forkD,forkD)*1.65)*branchGate*motion.z*smoothstep(0.33,0.65,neck);
+                    // 小さな燃焼帯が根元から上へ通過する。固定した柱の輪郭を持ち上げる動きにしない。
+                    float packet = N(float3(j*13.17+2.9,aboveRoot*3.3-t*(1.74+j*0.041),17.6));
+                    float packetDensity = lerp(0.62,1.18,smoothstep(0.24,0.73,packet));
+                    field += (core+fork) * gate * activation * breakup * packetDensity;
                     height = max(height, saturate(y)*exp(-dot(d,d)));
                 }
                 // 薪の隙間に連続する低い燃焼層。高所へは伸びない。
@@ -72,7 +115,7 @@ Shader "InteractiveBonfire/VolumeFlame"
                 baseBed *= smoothstep(0.04,0.15,p.y)*(1-smoothstep(0.25,0.55,p.y));
                 field += baseBed * _Energy * 0.26;
                 float n = Turbulence(flow*1.6);
-                float fine = N(flow * float3(4.0,1.3,4.0) + warp*3.0);
+                float fine = N(p*float3(11,4.2,12)-float3(0.11*t,2.5*t,-0.09*t)+warp*1.8);
                 // 密度を連続変調し、穴を硬く切り抜く処理を避ける。
                 float iso = 0.19 + 0.27*n;
                 float body = smoothstep(iso-0.045,iso+0.16,field);
@@ -107,11 +150,11 @@ Shader "InteractiveBonfire/VolumeFlame"
                 int steps = clamp(_Steps,24,128);
                 float ds = (finish-start)/steps;
                 float4 result = 0;
+                float jitter = frac(sin(dot(i.positionCS.xy,float2(12.9898,78.233)))*43758.5453);
                 [loop] for (int k=0;k<128;k++)
                 {
                     if(k>=steps || result.a>0.985) break;
                     // 画素ごとに積分開始位置をずらし、薄い層の等高線状エイリアスを抑える。
-                    float jitter = frac(sin(dot(i.positionCS.xy,float2(12.9898,78.233)))*43758.5453);
                     float distance = start+(k+0.2+0.6*jitter)*ds;
                     float3 p=ro+rd*distance;
                     float heat, height;

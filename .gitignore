@@ -3,6 +3,7 @@
 /_template/
 /BonfireUnity/Assets/_Recovery/
 /BonfireUnity/Assets/_Recovery.meta
+/BonfireUnity/Verification/NaturalMotion/frame-*.png
 *.log
 
 # Unityが再生成するキャッシュ・個人用設定。
