@@ -59,12 +59,6 @@ namespace InteractiveBonfire
             box.GetComponent<MeshRenderer>().shadowCastingMode=ShadowCastingMode.Off;
             var volume=box.AddComponent<BonfireVolume>(); volume.material=flameMaterial; volume.raySteps=initialRaySteps; volume.density=initialDensity;
             volume.motionSpeed=initialMotionSpeed; volume.turbulenceStrength=initialTurbulenceStrength;
-            // 火点は薪の隙間に固定。wは移流版では熱量差、手続き版では相対高さに使用。
-            volume.SetSources(new [] {
-                new Vector4(0f,0.40f,0.08f,1.0f), new Vector4(-0.38f,0.23f,-0.06f,0.72f),
-                new Vector4(0.38f,0.25f,0.06f,0.62f), new Vector4(-0.16f,0.26f,-0.29f,0.66f),
-                new Vector4(0.20f,0.30f,0.27f,0.81f),new Vector4(-0.62f,0.18f,0.10f,0.39f),
-                new Vector4(0.62f,0.21f,-0.18f,0.43f) });
 
             var lightObject=new GameObject("Fire light"); lightObject.transform.SetParent(transform,false);
             lightObject.transform.localPosition=new Vector3(0,0.8f,-0.15f);

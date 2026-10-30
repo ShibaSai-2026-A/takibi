@@ -1,95 +1,190 @@
 #pragma kernel Clear
-#pragma kernel Advect
-#pragma kernel BuildHeatProfile
+#pragma kernel AdvectVelocity
+#pragma kernel Vorticity
+#pragma kernel ApplyForces
+#pragma kernel Divergence
+#pragma kernel Jacobi
+#pragma kernel Project
+#pragma kernel AdvectState
 
+// 炎全体を一つの流れとして解く小型の3D流体。柱や輪郭を持たず、見える形はすべて燃焼量 Y の等値面から決まる。
 Texture3D<float4> _Read;
-SamplerState sampler_Read;
+Texture3D<float4> _Aux;
+Texture3D<float4> _Velocity;
+Texture3D<float4> _State;
+Texture3D<float4> _Noise;
+SamplerState my_linear_clamp_sampler;
+SamplerState my_linear_repeat_sampler;
 RWTexture3D<float4> _Write;
-RWTexture2D<float4> _HeatProfileWrite;
 int3 _Resolution;
-float _Dt, _Energy, _Breath, _TimeValue, _Turbulence;
-float4 _Sources[7];
+float _Dt, _Energy, _Flame, _BedRadius, _Turbulence;
+float3 _Gust, _Drift, _BedCenter;
 
 static const float3 BoxMin=float3(-1.55,-0.15,-1.1);
 static const float3 BoxSize=float3(3.1,3.6,2.2);
+static const float Buoyancy=8.5;
+static const float Drag=1.7;
+static const float Confinement=5.5;
+static const float BurnRate=0.16;
+static const float FrontSpeed=0.28;
+static const float Cooling=0.85;
+static const float VentSpeed=2.3;
 
-float Pulse(float seed,float t)
-{
-    float cell=floor(t), f=frac(t);
-    f=f*f*f*(f*(f*6-15)+10);
-    float a=frac(sin(cell*17.17+seed*91.3)*43758.5453);
-    float b=frac(sin((cell+1)*17.17+seed*91.3)*43758.5453);
-    return lerp(a,b,f);
-}
+float3 CellSize() { return BoxSize/float3(_Resolution); }
+float3 Position(uint3 id) { return BoxMin+(id+0.5)*CellSize(); }
+float3 Uv(uint3 id) { return (id+0.5)/float3(_Resolution); }
+float4 At(Texture3D<float4> field,int3 id) { return field.Load(int4(clamp(id,int3(0,0,0),_Resolution-1),0)); }
+float3 NoiseAt(float3 coordinate) { return _Noise.SampleLevel(my_linear_repeat_sampler,coordinate/48.0,0).rgb; }
 
-float3 Curl(float3 p,float t)
+// 火床は一つの広がり。燃える場所は火力に応じて連続的に広がり、まだらに移動する。
+float BedAmount(float3 p)
 {
-    // ベクトルポテンシャルの解析的なcurl。全体を一斉に振るのではなく空間内で回転する。
-    float a=cos(1.3*p.y+0.9*p.z+0.73*t)*cos(0.7*p.x-1.1*t);
-    float b=cos(1.7*p.z+0.6*p.x-0.87*t);
-    float c=cos(1.4*p.x+0.8*p.y+1.4*t)*cos(0.9*p.z);
-    return float3(0.8*c-1.7*b,0.9*a-1.4*c,0.6*b-1.3*a);
+    if(_Flame<=0) return 0;
+    float2 offset=(p.xz-_BedCenter.xz)/float2(0.78,0.42);
+    float bedY=0.24+0.22*saturate(1-dot(offset,offset));
+    float3 d=float3((p.x-_BedCenter.x)/(0.66*_BedRadius),(p.y-bedY)/0.16,(p.z-_BedCenter.z)/(0.36*_BedRadius));
+    float footprint=exp(-dot(d,d)*1.4);
+    if(footprint<0.002) return 0;
+    float patchNoise=NoiseAt(float3(p.x*3.3,_Drift.y*0.55,p.z*3.3)+_Drift*float3(0.7,0,0.7)+73.0).g;
+    float threshold=lerp(0.46,0.34,saturate(_Energy*1.25));
+    // まだらの濃淡がそのまま炎の舌の高さの差になる。
+    return footprint*smoothstep(threshold,threshold+0.14,patchNoise)*(0.55+0.9*patchNoise);
 }
 
 [numthreads(8,8,4)]
 void Clear(uint3 id:SV_DispatchThreadID) { _Write[id]=0; }
 
 [numthreads(8,8,4)]
-void Advect(uint3 id:SV_DispatchThreadID)
+void AdvectVelocity(uint3 id:SV_DispatchThreadID)
 {
-    float3 uv=(id+0.5)/float3(_Resolution);
-    float3 p=BoxMin+uv*BoxSize;
-    float temperature=_Read.SampleLevel(sampler_Read,uv,0).g;
-    float3 curl=Curl(p*2.2+float3(3.1,7.4,1.7),_TimeValue*0.72)*0.55;
-    curl+=Curl(p*5.1+float3(13.2,2.6,9.1),_TimeValue*1.13)*0.19;
-    curl+=Curl(p*9.6+float3(1.7,23.4,11.2),_TimeValue*1.67)*0.10;
-    float height=saturate((p.y-0.25)/2.2);
-    float rootAnchor=smoothstep(0.25,0.56,p.y);
-    float3 velocity=float3(-p.x*0.10,0.72+temperature*1.05,-p.z*0.10);
-    velocity.xz+=curl.xz*(0.40+0.55*height)*rootAnchor*_Turbulence;
-    velocity.y+=curl.y*0.20*rootAnchor*_Turbulence;
-    velocity.y+=_Breath*0.10*temperature;
-    float3 previousUV=uv-velocity*_Dt/BoxSize;
-    float4 state=0;
-    if(all(previousUV>0) && all(previousUV<1)) state=_Read.SampleLevel(sampler_Read,previousUV,0);
-    // 温度が下がると先端から発光が消える。炎の高さやTransformを伸縮しない。
-    state.r*=exp(-_Dt*0.42);
-    state.g*=exp(-_Dt*(1.12+0.28*(1-_Energy)));
-
-    float sourceDensity=0, sourceHeat=0;
-    [unroll] for(int j=0;j<7;j++)
-    {
-        float4 source=_Sources[j];
-        float activation=j==0?smoothstep(0.005,0.12,_Energy):smoothstep(0.10+j*0.035,0.40+j*0.055,_Energy);
-        float3 d=(p-source.xyz)/float3(0.215,0.080,0.165);
-        float footprint=exp(-dot(d,d)*1.8);
-        float pulse=Pulse(j+1.3,_TimeValue*(1.65+j*0.073));
-        float emitted=footprint*activation*(0.48+0.72*pulse);
-        sourceDensity+=emitted*(0.08+_Energy*0.92);
-        sourceHeat+=emitted*(0.12+_Energy*1.20)*lerp(0.76,1.05,source.w);
-    }
-    state.r+=sourceDensity*_Dt*12;
-    state.g+=sourceHeat*_Dt*16;
-    // 端の1〜2セルは吸収境界。上端で炎が切れて見えるのを抑える。
-    float edge=min(min(uv.x,1-uv.x),min(uv.z,1-uv.z));
-    float boundary=smoothstep(0,0.035,edge)*(1-smoothstep(0.94,1,uv.y));
-    state.rg*=boundary;
-    _Write[id]=float4(clamp(state.rg,0,1.8),0,0);
+    float3 v=_Read.Load(int4(id,0)).xyz;
+    float3 previous=Uv(id)-v*_Dt/BoxSize;
+    _Write[id]=float4(_Read.SampleLevel(my_linear_clamp_sampler,previous,0).xyz,0);
 }
 
-groupshared float HeatPeak[64];
-[numthreads(64,1,1)]
-void BuildHeatProfile(uint3 group:SV_GroupID,uint lane:SV_GroupIndex)
+[numthreads(8,8,4)]
+void Vorticity(uint3 id:SV_DispatchThreadID)
 {
-    // 熱が到達した高さをGPUで抽出する。見た目の輪郭とは分離する。
-    float peak=0;
-    for(int z=0;z<_Resolution.z;z++) peak=max(peak,_Read.Load(int4(lane,group.y,z,0)).g);
-    HeatPeak[lane]=peak;
-    GroupMemoryBarrierWithGroupSync();
-    for(uint stride=32;stride>0;stride>>=1)
+    int3 c=id; float3 h=2*CellSize();
+    float3 dx=(At(_Read,c+int3(1,0,0)).xyz-At(_Read,c-int3(1,0,0)).xyz)/h.x;
+    float3 dy=(At(_Read,c+int3(0,1,0)).xyz-At(_Read,c-int3(0,1,0)).xyz)/h.y;
+    float3 dz=(At(_Read,c+int3(0,0,1)).xyz-At(_Read,c-int3(0,0,1)).xyz)/h.z;
+    float3 curl=float3(dy.z-dz.y,dz.x-dx.z,dx.y-dy.x);
+    _Write[id]=float4(curl,length(curl));
+}
+
+[numthreads(8,8,4)]
+void ApplyForces(uint3 id:SV_DispatchThreadID)
+{
+    int3 c=id; float3 h=2*CellSize(), p=Position(id);
+    float3 v=_Read.Load(int4(id,0)).xyz;
+    float temperature=_State.Load(int4(id,0)).g;
+    float hot=saturate(temperature*2.2);
+
+    // 数値拡散で失われる渦を戻す。これが炎の巻き込みとくびれを作る。
+    float3 gradient=float3(At(_Aux,c+int3(1,0,0)).w-At(_Aux,c-int3(1,0,0)).w,
+        At(_Aux,c+int3(0,1,0)).w-At(_Aux,c-int3(0,1,0)).w,
+        At(_Aux,c+int3(0,0,1)).w-At(_Aux,c-int3(0,0,1)).w)/h;
+    float3 curl=_Aux.Load(int4(id,0)).xyz;
+    float3 confine=cross(gradient/(length(gradient)+0.001),curl)*Confinement*CellSize().x;
+
+    // 乱れは熱のある所だけに与える。ノイズの座標は乱数で歩くので、同じ流れを繰り返さない。
+    float3 wide=NoiseAt(p*float3(1.05,0.72,1.05)+_Drift)-0.5;
+    float3 fine=NoiseAt(p*float3(2.6,2.0,2.6)+_Drift*2.3+17.3)-0.5;
+    float3 stir=(wide*6.0+fine*13.0)*hot*_Turbulence;
+
+    float above=smoothstep(0.15,0.70,p.y);
+    float3 force=float3(0,Buoyancy*temperature,0)+(confine*hot+stir)*above;
+    force.xz+=_Gust.xz*smoothstep(0.25,2.2,p.y);
+    v+=force*_Dt;
+    v*=exp(-_Dt*Drag);
+    // 薪の間は空気が横へ大きく流れない。根元を暴れさせず、上だけが大きく動く。
+    v.xz*=exp(-_Dt*6.0*(1-above));
+    // 燃えるガスが火床から上へ噴き出す。薄い熱の層は浮力だけでは圧力と釣り合って上がらない。
+    float vent=BedAmount(p);
+    v.y=lerp(v.y,max(v.y,VentSpeed*(0.35+0.65*_Flame)),saturate(vent*_Dt*30));
+    if(id.y==0) v=0;
+    _Write[id]=float4(v,0);
+}
+
+[numthreads(8,8,4)]
+void Divergence(uint3 id:SV_DispatchThreadID)
+{
+    int3 c=id; float3 h=2*CellSize();
+    float d=(At(_Read,c+int3(1,0,0)).x-At(_Read,c-int3(1,0,0)).x)/h.x
+        +(At(_Read,c+int3(0,1,0)).y-At(_Read,c-int3(0,1,0)).y)/h.y
+        +(At(_Read,c+int3(0,0,1)).z-At(_Read,c-int3(0,0,1)).z)/h.z;
+    _Write[id]=float4(d,0,0,0);
+}
+
+// 側面と上面は開いた境界（圧力0）で、周囲から空気が吸い込まれる。床だけ閉じる。
+float PressureAt(int3 id)
+{
+    if(id.x<0 || id.x>=_Resolution.x || id.z<0 || id.z>=_Resolution.z || id.y>=_Resolution.y) return 0;
+    if(id.y<0) id.y=0;
+    return _Read.Load(int4(id,0)).x;
+}
+
+[numthreads(8,8,4)]
+void Jacobi(uint3 id:SV_DispatchThreadID)
+{
+    int3 c=id; float3 cell=CellSize(), w=1/(cell*cell);
+    float sum=(PressureAt(c+int3(1,0,0))+PressureAt(c-int3(1,0,0)))*w.x
+        +(PressureAt(c+int3(0,1,0))+PressureAt(c-int3(0,1,0)))*w.y
+        +(PressureAt(c+int3(0,0,1))+PressureAt(c-int3(0,0,1)))*w.z;
+    float next=(sum-_Aux.Load(int4(id,0)).x)/(2*(w.x+w.y+w.z));
+    _Write[id]=float4(next,0,0,0);
+}
+
+float AuxPressureAt(int3 id)
+{
+    if(id.x<0 || id.x>=_Resolution.x || id.z<0 || id.z>=_Resolution.z || id.y>=_Resolution.y) return 0;
+    if(id.y<0) id.y=0;
+    return _Aux.Load(int4(id,0)).x;
+}
+
+[numthreads(8,8,4)]
+void Project(uint3 id:SV_DispatchThreadID)
+{
+    int3 c=id; float3 h=2*CellSize();
+    float3 gradient=float3(AuxPressureAt(c+int3(1,0,0))-AuxPressureAt(c-int3(1,0,0)),
+        AuxPressureAt(c+int3(0,1,0))-AuxPressureAt(c-int3(0,1,0)),
+        AuxPressureAt(c+int3(0,0,1))-AuxPressureAt(c-int3(0,0,1)))/h;
+    _Write[id]=float4(_Read.Load(int4(id,0)).xyz-gradient,0);
+}
+
+[numthreads(8,8,4)]
+void AdvectState(uint3 id:SV_DispatchThreadID)
+{
+    float3 p=Position(id), uv=Uv(id);
+    int3 c=id;
+    float3 v=_Velocity.Load(int4(id,0)).xyz;
+    float2 state=_Read.SampleLevel(my_linear_clamp_sampler,uv-v*_Dt/BoxSize,0).rg;
+
+    float3 cell=2*CellSize();
+    float3 gradient=float3(At(_Read,c+int3(1,0,0)).r-At(_Read,c-int3(1,0,0)).r,
+        At(_Read,c+int3(0,1,0)).r-At(_Read,c-int3(0,1,0)).r,
+        At(_Read,c+int3(0,0,1)).r-At(_Read,c-int3(0,0,1)).r)/cell;
+    float slope=length(gradient);
+
+    // 炎は表面から内側へ燃え進む（等値面を法線方向に動かす）。これで丸い塊にならず先端が尖る。
+    // 燃える速さの場所ごとの差が、舌の分かれと千切れを作る。
+    float burnNoise=NoiseAt(p*float3(3.1,1.6,3.1)+_Drift*1.4+41.0).r;
+    state.r=max(0,state.r-_Dt*(BurnRate+FrontSpeed*min(slope,7.0))*(0.45+1.7*burnNoise));
+    state.g*=exp(-_Dt*Cooling);
+
+    float amount=BedAmount(p);
+    if(amount>0)
     {
-        if(lane<stride) HeatPeak[lane]=max(HeatPeak[lane],HeatPeak[lane+stride]);
-        GroupMemoryBarrierWithGroupSync();
+        float rate=1-exp(-_Dt*24);
+        state.r=lerp(state.r,max(state.r,_Flame*amount),rate);
+        state.g=lerp(state.g,max(state.g,(0.25+0.85*_Flame)*amount),rate);
     }
-    if(lane==0) _HeatProfileWrite[int2(group.y,0)]=float4(HeatPeak[0],0,0,0);
+
+    float3 uvEdge=min(uv,1-uv);
+    float boundary=smoothstep(0,0.04,min(uvEdge.x,uvEdge.z))*(1-smoothstep(0.93,1,uv.y));
+    state*=boundary;
+
+    // 等値面の幅を空間で一定にするため、描画用に Y の勾配の大きさを持たせる。
+    _Write[id]=float4(state,slope,0);
 }

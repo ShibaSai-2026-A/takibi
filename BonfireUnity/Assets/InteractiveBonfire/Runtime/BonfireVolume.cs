@@ -9,21 +9,11 @@ namespace InteractiveBonfire
         [Range(0.3f, 2f)] public float density = 1f;
         [Tooltip("炎内部の流れの速さ。火力が育つ時間とは別の設定です")]
         [Range(0.25f, 2f)] public float motionSpeed = 1f;
-        [Tooltip("根元を固定したまま、上部を曲げる強さ")]
+        [Tooltip("流れを乱す強さ。大きいほど炎全体が大きくうねります")]
         [Range(0.2f, 1.8f)] public float turbulenceStrength = 1f;
-        [Tooltip("密度と温度をGPU上で移流する。非対応GPUでは手続き方式へ戻ります")]
-        public bool useAdvectedSimulation = true;
-        public Vector4[] sources;
         MaterialPropertyBlock block;
         MeshRenderer meshRenderer;
         Texture3D noise;
-        const int FuelSamples = 128;
-        const float FuelInterval = 1f / 30f;
-        readonly float[] fuelHistory = new float[FuelSamples];
-        readonly Color[] fuelPixels = new Color[FuelSamples];
-        Texture2D fuelTexture;
-        float fuelPhase, previousFuel;
-        readonly Vector4[] sourceMotion = new Vector4[7];
         double animationTime;
         double lastClock = -1;
         float smoothedEnergy, smoothedBreath;
@@ -39,21 +29,17 @@ namespace InteractiveBonfire
             meshRenderer = GetComponent<MeshRenderer>(); block = new MaterialPropertyBlock();
             noise = MakeNoise();
             block.SetTexture("_NoiseTex", noise);
-            fuelTexture = new Texture2D(FuelSamples, 1, TextureFormat.RGBAFloat, false, true)
-            { name = "Upward fuel history", wrapMode = TextureWrapMode.Clamp, filterMode = FilterMode.Bilinear };
-            block.SetTexture("_FuelHistory", fuelTexture);
-            UpdateFuelHistory(0, 0);
-            if(useAdvectedSimulation && SystemInfo.supportsComputeShaders && SystemInfo.SupportsRenderTextureFormat(RenderTextureFormat.ARGBHalf))
+            if(SystemInfo.supportsComputeShaders && SystemInfo.SupportsRenderTextureFormat(RenderTextureFormat.ARGBHalf))
             {
                 var compute=Resources.Load<ComputeShader>("AdvectedFire");
                 if(compute)
                 {
-                    try { simulation=new BonfireSimulation(compute); }
-                    catch(System.Exception error) { Debug.LogWarning("3D移流を開始できないため手続き炎を使用します: "+error.Message,this); }
+                    try { simulation=new BonfireSimulation(compute,noise); }
+                    catch(System.Exception error) { Debug.LogError("炎の流体計算を開始できません: "+error.Message,this); }
                 }
             }
-            // xyz: 薪に埋め込む固定火点。w: 熱量の比率（手続き版では相対高さ）。
-            if (sources != null && sources.Length == 7) block.SetVectorArray("_Sources", sources);
+            if(simulation==null) Debug.LogError("このGPUでは炎の流体計算を実行できないため、炎は表示されません。",this);
+            ApplySimulation();
             meshRenderer.SetPropertyBlock(block);
         }
 
@@ -64,24 +50,7 @@ namespace InteractiveBonfire
             double now = Time.timeAsDouble;
             float dt = lastClock < 0 ? 0f : Mathf.Clamp((float)(now - lastClock), 0f, 0.1f);
             lastClock = now;
-            AdvanceAnimation(dt, energy, breath);
-            if(simulation!=null) simulation.Step(dt,energy,smoothedBreath,(float)animationTime,motionSpeed,turbulenceStrength,sources);
-            block.SetFloat("_Energy", energy);
-            block.SetFloat("_Breath", smoothedBreath);
-            block.SetFloat("_Exposure", exposure);
-            block.SetFloat("_Density", density);
-            ApplyMotion();
-            ApplySimulation();
-            block.SetInt("_Steps", raySteps);
-            meshRenderer.SetPropertyBlock(block);
-        }
-
-        public void SetSources(Vector4[] values)
-        {
-            Initialize();
-            sources = values;
-            if (block != null && values.Length == 7)
-            { block.SetVectorArray("_Sources",values); meshRenderer.SetPropertyBlock(block); }
+            Advance(dt, energy, breath, exposure);
         }
 
         public void SetAnimationTime(float seconds)
@@ -92,9 +61,14 @@ namespace InteractiveBonfire
 
         public void SimulatePreview(float deltaSeconds,float energy,float breath,float exposure)
         {
-            // Editorの連続フレーム検証で、実行時と同じ移流ステップを進める。
-            Initialize(); AdvanceAnimation(deltaSeconds,energy,breath);
-            if(simulation!=null) simulation.Step(deltaSeconds,energy,smoothedBreath,(float)animationTime,motionSpeed,turbulenceStrength,sources);
+            // Editorの連続フレーム検証で、実行時と同じ流体ステップを進める。
+            Initialize(); Advance(deltaSeconds,energy,breath,exposure);
+        }
+
+        void Advance(float dt,float energy,float breath,float exposure)
+        {
+            AdvanceAnimation(dt,energy,breath);
+            if(simulation!=null) simulation.Step(dt,energy,smoothedBreath,motionSpeed,turbulenceStrength);
             block.SetFloat("_Energy",energy); block.SetFloat("_Breath",smoothedBreath);
             block.SetFloat("_Exposure",exposure); block.SetFloat("_Density",density); block.SetInt("_Steps",raySteps);
             ApplyMotion(); ApplySimulation(); meshRenderer.SetPropertyBlock(block);
@@ -103,18 +77,12 @@ namespace InteractiveBonfire
         public void ResetSimulation()
         {
             if(simulation!=null) simulation.Reset(); animationTime=0; smoothedEnergy=smoothedBreath=0; lastClock=Time.timeAsDouble;
-            System.Array.Clear(fuelHistory,0,FuelSamples); fuelPhase=previousFuel=0;
-            if(fuelTexture) UpdateFuelHistory(0,0);
         }
 
         void ApplySimulation()
         {
-            block.SetFloat("_UseSimulation",simulation!=null?1f:0f);
-            if(simulation!=null)
-            {
-                block.SetTexture("_SimTex",simulation.Texture);
-                block.SetTexture("_HeatProfile",simulation.HeatProfile);
-            }
+            // 流体の結果は毎ステップ別のテクスチャへ入れ替わるので、その都度渡す。
+            if(simulation!=null) block.SetTexture("_SimTex",simulation.Texture);
         }
 
         public void AdvanceAnimation(float deltaSeconds, float energy, float breath)
@@ -124,52 +92,12 @@ namespace InteractiveBonfire
             smoothedEnergy = Mathf.Lerp(smoothedEnergy, Mathf.Clamp01(energy), 1f - Mathf.Exp(-dt / 0.65f));
             smoothedBreath = Mathf.Lerp(smoothedBreath, Mathf.Clamp01(breath), 1f - Mathf.Exp(-dt / 0.55f));
             animationTime += dt * motionSpeed * Mathf.Lerp(0.72f, 1.12f, smoothedEnergy);
-            UpdateFuelHistory(dt, Mathf.Clamp01(energy));
-        }
-
-        void UpdateFuelHistory(float dt, float fuel)
-        {
-            // 根元で生まれた火力の履歴を上へ運ぶ。減衰時に全高を同時に細くしない。
-            float untilTick = FuelInterval - fuelPhase;
-            for(float elapsed=untilTick; elapsed<=dt; elapsed+=FuelInterval)
-            {
-                for(int i=FuelSamples-1;i>0;i--) fuelHistory[i]=fuelHistory[i-1];
-                fuelHistory[0]=Mathf.Lerp(previousFuel,fuel,dt>0?elapsed/dt:1f);
-            }
-            fuelPhase=Mathf.Repeat(fuelPhase+dt,FuelInterval);
-            float phase=fuelPhase/FuelInterval, peak=fuel;
-            for(int i=0;i<FuelSamples;i++)
-            {
-                float value=i==0?fuel:Mathf.Lerp(fuelHistory[i],fuelHistory[i-1],phase);
-                fuelPixels[i]=new Color(value,0,0,1); peak=Mathf.Max(peak,value);
-            }
-            previousFuel=fuel;
-            if(fuelTexture) { fuelTexture.SetPixels(fuelPixels); fuelTexture.Apply(false,false); }
-            if(block!=null) block.SetFloat("_FuelPeak",peak);
-        }
-
-        public float FuelAtAge(float seconds)
-        {
-            float index=Mathf.Clamp(seconds/FuelInterval,0,FuelSamples-1);
-            int lower=Mathf.FloorToInt(index), upper=Mathf.Min(lower+1,FuelSamples-1);
-            return Mathf.Lerp(fuelPixels[lower].r,fuelPixels[upper].r,index-lower);
         }
 
         void ApplyMotion()
         {
-            float t = (float)animationTime;
-            for (int j = 0; j < sourceMotion.Length; j++)
-            {
-                float seed = 8.37f + j * 5.19f;
-                // GPUの各レイで共通する低速の揺らぎはCPUで一度だけ求める。
-                float height = 0.87f + 0.20f * Mathf.PerlinNoise(seed, t * 0.53f);
-                float thickness = 0.88f + 0.20f * Mathf.PerlinNoise(seed + 17f, t * 0.39f);
-                float fork = Mathf.SmoothStep(0f, 0.52f, Mathf.InverseLerp(0.42f, 0.72f, Mathf.PerlinNoise(seed + 33f, t * 0.67f)));
-                sourceMotion[j] = new Vector4(height, thickness, fork, j % 2 == 0 ? 1f : -1f);
-            }
-            block.SetFloat("_AnimationTime", t);
+            block.SetFloat("_AnimationTime", (float)animationTime);
             block.SetFloat("_MotionStrength", turbulenceStrength);
-            block.SetVectorArray("_SourceMotion", sourceMotion);
         }
 
         static Texture3D MakeNoise()
@@ -180,14 +108,16 @@ namespace InteractiveBonfire
             for (int i = 0; i < pixels.Length; i++)
             {
                 state ^= state << 13; state ^= state >> 17; state ^= state << 5;
-                byte r = (byte)(state & 255);
-                pixels[i] = new Color32(r, r, r, 255);
+                uint bits = state;
+                state ^= state << 13; state ^= state >> 17; state ^= state << 5;
+                // 流体の外力に3方向の独立した乱数が要るので、チャンネルごとに別の値を持つ。
+                pixels[i] = new Color32((byte)bits, (byte)(bits >> 8), (byte)(bits >> 16), (byte)state);
             }
             var tex = new Texture3D(size, size, size, TextureFormat.RGBA32, false)
             { name = "Runtime periodic 3D noise", wrapMode = TextureWrapMode.Repeat, filterMode = FilterMode.Bilinear };
             tex.SetPixels32(pixels); tex.Apply(false, true);
             return tex;
         }
-        void OnDestroy() { if (noise) Destroy(noise); if(fuelTexture) Destroy(fuelTexture); if(simulation!=null) simulation.Dispose(); }
+        void OnDestroy() { if (noise) Destroy(noise); if(simulation!=null) simulation.Dispose(); }
     }
 }
