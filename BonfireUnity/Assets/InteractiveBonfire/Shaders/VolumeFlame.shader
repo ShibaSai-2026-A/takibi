@@ -29,8 +29,9 @@ Shader "InteractiveBonfire/VolumeFlame"
             TEXTURE3D(_NoiseTex); SAMPLER(sampler_NoiseTex);
             TEXTURE3D(_SimTex); SAMPLER(sampler_SimTex);
             TEXTURE2D(_HeatProfile); SAMPLER(sampler_HeatProfile);
+            TEXTURE2D(_FuelHistory); SAMPLER(sampler_FuelHistory);
             CBUFFER_START(UnityPerMaterial)
-            float _Energy, _Breath, _Exposure, _Density, _AnimationTime, _MotionStrength, _UseSimulation;
+            float _Energy, _Breath, _Exposure, _Density, _AnimationTime, _MotionStrength, _UseSimulation, _FuelPeak;
             int _Steps;
             CBUFFER_END
             float4 _Sources[7];
@@ -52,6 +53,12 @@ Shader "InteractiveBonfire/VolumeFlame"
             // 時間とともに上昇する連続ノイズ。格子を切り替えない。
             float Turbulence(float3 p) { return N(p) * 0.58 + N(p * 2.07 + 7.3) * 0.28 + N(p * 4.13 - 9.1) * 0.14; }
             float ShapeNoise(float3 p) { return SAMPLE_TEXTURE3D_LOD(_NoiseTex,sampler_NoiseTex,p/48.0,0).r; }
+            float Fuel(float aboveRoot)
+            {
+                // 根元から毎秒約1.1mで運ばれる火力。成長と減衰で同じ形を逆再生しない。
+                float index=clamp(max(0,aboveRoot)/1.1*30.0,0,127);
+                return SAMPLE_TEXTURE2D_LOD(_FuelHistory,sampler_FuelHistory,float2((index+0.5)/128.0,0.5),0).r;
+            }
             float PreviousAppearance(float3 p,out float heat,out float height)
             {
                 // 一つ前の細い輪郭・重なり・内部の筋を再現。高さを火力で伸ばす処理は戻さない。
@@ -61,19 +68,26 @@ Shader "InteractiveBonfire/VolumeFlame"
                 float rise=saturate((p.y-0.13)/2.7);
                 float3 q=p;
                 q.xz+=warp.xz*(0.13+rise*(0.7+_Breath*0.15))*_MotionStrength;
-                q.x+=sin(p.y*3.9-t*2.2)*rise*0.10*_MotionStrength;
+                float2 bend=float2(N(float3(8.1,p.y*1.6-t*0.89,4.7)),N(float3(27.3,p.y*1.1-t*0.61,18.2)))-0.5;
+                q.xz+=bend*rise*0.20*_MotionStrength;
                 float field=0; height=0;
                 [unroll] for(int j=0;j<7;j++)
                 {
                     float4 s=_Sources[j];
-                    float activation=j==0?smoothstep(0.005,0.12,_Energy):smoothstep(0.10+j*0.035,0.40+j*0.055,_Energy);
+                    float fuel=Fuel(p.y-s.y);
+                    float activation=j==0?smoothstep(0.005,0.12,fuel):smoothstep(0.10+j*0.035,0.40+j*0.055,fuel);
                     float h=2.6*s.w*(0.83+0.24*ShapeNoise(float3(j*6.3,t*1.35,3.1)));
                     float y=(q.y-s.y)/max(0.05,h);
                     float gate=smoothstep(-0.04,0.04,y)*(1-smoothstep(0.72,1.02,y));
-                    float r=(0.10+0.115*_Energy)*pow(saturate(1-y),0.72)+0.012;
-                    float2 center=s.xz+float2(sin(y*6-t*1.6+j),cos(y*4.2-t*1.3+j*1.8))*y*y*(0.07+0.12*_Energy)*_MotionStrength;
+                    float r=(0.10+0.115*fuel)*pow(saturate(1-y),0.72)+0.012;
+                    float age=p.y-s.y;
+                    float2 drift=float2(N(float3(j*6.3+3.1,age*2.4-t*(1.13+j*0.037),12.9)),N(float3(j*4.7+19.2,age*2.1-t*(0.93+j*0.051),37.1)))*2-1;
+                    float2 center=s.xz+drift*y*y*(0.07+0.12*fuel)*_MotionStrength;
+                    float neck=N(float3(j*8.3+2.1,age*3.8-t*(1.67+j*0.043),23.4));
+                    r*=lerp(0.87,1.10,neck);
                     float2 d=(q.xz-center)/float2(r,r*0.72);
-                    field+=exp(-dot(d,d)*1.65)*gate*activation;
+                    float breakup=lerp(1.0,smoothstep(0.18,0.48,neck),smoothstep(0.45,0.95,y));
+                    field+=exp(-dot(d,d)*1.65)*gate*activation*breakup;
                     height=max(height,saturate(y)*exp(-dot(d,d)));
                 }
                 float baseBed=exp(-dot(q.xz/float2(0.65,0.32),q.xz/float2(0.65,0.32))*2.4);
@@ -87,7 +101,7 @@ Shader "InteractiveBonfire/VolumeFlame"
                 float membrane=exp(-abs(field-iso)*5.5)*smoothstep(0.035,0.18,field);
                 float filaments=pow(saturate(1-abs(fine*2-1)),3);
                 heat=saturate(0.20+membrane*0.52+filaments*0.20-height*0.20+(1-rise)*0.14);
-                return (membrane*(0.65+0.35*filaments)+body*0.085)*smoothstep(0.002,0.04,_Energy);
+                return (membrane*(0.65+0.35*filaments)+body*0.085)*smoothstep(0.002,0.04,Fuel(p.y-0.30));
             }
             float Field(float3 p, out float heat, out float height)
             {
@@ -115,19 +129,20 @@ Shader "InteractiveBonfire/VolumeFlame"
                 {
                     float4 s = _Sources[j];
                     float4 motion = _SourceMotion[j];
-                    float activation = j == 0 ? smoothstep(0.005,0.12,_Energy) : smoothstep(0.10+j*0.035,0.40+j*0.055,_Energy);
-                    float h = (0.10 + 2.5*pow(_Energy,0.78)) * s.w;
+                    float fuel=Fuel(p.y-s.y);
+                    float activation = j == 0 ? smoothstep(0.005,0.12,fuel) : smoothstep(0.10+j*0.035,0.40+j*0.055,fuel);
+                    float h = 2.6 * s.w;
                     h *= motion.x;
                     float aboveRoot = q.y-s.y;
                     float y = aboveRoot / max(0.05,h);
                     float gate = smoothstep(-0.04,0.04,y) * (1-smoothstep(0.80,1.06,y));
-                    float r = (0.10 + 0.115*_Energy) * pow(saturate(1-y),0.72) + 0.012;
+                    float r = (0.10 + 0.115*fuel) * pow(saturate(1-y),0.72) + 0.012;
                     // 流れはワールド空間の高さで評価する。火力が変わっても既存の炎を縦に引き伸ばさない。
                     float age = aboveRoot*2.15-t*(1.15+j*0.047);
                     float2 localFlow = float2(N(float3(j*7.3,age,9.2)),N(float3(j*7.3+21.4,age*0.91,31.7)))-0.5;
                     float neck = N(float3(j*5.19+4.7,aboveRoot*3.05-t*(1.52+j*0.033),42.3));
                     r *= motion.y * (0.82+0.32*neck);
-                    float2 center = s.xz + localFlow * pow(saturate(aboveRoot/1.8),1.45) * (0.22+0.18*_Energy) * _MotionStrength;
+                    float2 center = s.xz + localFlow * pow(saturate(aboveRoot/1.8),1.45) * (0.22+0.18*fuel) * _MotionStrength;
                     float2 d = (q.xz-center)/float2(r,r*0.72);
                     // 上部だけにくびれを通すことで、先端が細まり、離れて消える。
                     float breakup = lerp(1.0,smoothstep(0.19,0.52,neck),smoothstep(0.43,0.95,y));
@@ -158,11 +173,11 @@ Shader "InteractiveBonfire/VolumeFlame"
                 float filaments = pow(saturate(1-abs(fine*2-1)),3);
                 float density = membrane*(0.65+0.35*filaments) + body*0.085;
                 heat = saturate(0.20 + membrane*0.52 + filaments*0.20 - height*0.20 + (1-rise)*0.14);
-                return density * smoothstep(0.002,0.04,_Energy);
+                return density * smoothstep(0.002,0.04,Fuel(p.y-0.30));
             }
             half4 Frag(Varyings i) : SV_Target
             {
-                if (_Energy < 0.002) return 0;
+                if (_FuelPeak < 0.002) return 0;
                 float3 ro = GetCameraPositionWS();
                 float3 rd = normalize(i.positionWS-ro);
                 float3 lo = TransformWorldToObject(ro);

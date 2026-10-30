@@ -17,6 +17,12 @@ namespace InteractiveBonfire
         MaterialPropertyBlock block;
         MeshRenderer meshRenderer;
         Texture3D noise;
+        const int FuelSamples = 128;
+        const float FuelInterval = 1f / 30f;
+        readonly float[] fuelHistory = new float[FuelSamples];
+        readonly Color[] fuelPixels = new Color[FuelSamples];
+        Texture2D fuelTexture;
+        float fuelPhase, previousFuel;
         readonly Vector4[] sourceMotion = new Vector4[7];
         double animationTime;
         double lastClock = -1;
@@ -33,6 +39,10 @@ namespace InteractiveBonfire
             meshRenderer = GetComponent<MeshRenderer>(); block = new MaterialPropertyBlock();
             noise = MakeNoise();
             block.SetTexture("_NoiseTex", noise);
+            fuelTexture = new Texture2D(FuelSamples, 1, TextureFormat.RGBAFloat, false, true)
+            { name = "Upward fuel history", wrapMode = TextureWrapMode.Clamp, filterMode = FilterMode.Bilinear };
+            block.SetTexture("_FuelHistory", fuelTexture);
+            UpdateFuelHistory(0, 0);
             if(useAdvectedSimulation && SystemInfo.supportsComputeShaders && SystemInfo.SupportsRenderTextureFormat(RenderTextureFormat.ARGBHalf))
             {
                 var compute=Resources.Load<ComputeShader>("AdvectedFire");
@@ -91,7 +101,11 @@ namespace InteractiveBonfire
         }
 
         public void ResetSimulation()
-        { if(simulation!=null) simulation.Reset(); animationTime=0; smoothedEnergy=smoothedBreath=0; lastClock=Time.timeAsDouble; }
+        {
+            if(simulation!=null) simulation.Reset(); animationTime=0; smoothedEnergy=smoothedBreath=0; lastClock=Time.timeAsDouble;
+            System.Array.Clear(fuelHistory,0,FuelSamples); fuelPhase=previousFuel=0;
+            if(fuelTexture) UpdateFuelHistory(0,0);
+        }
 
         void ApplySimulation()
         {
@@ -110,6 +124,35 @@ namespace InteractiveBonfire
             smoothedEnergy = Mathf.Lerp(smoothedEnergy, Mathf.Clamp01(energy), 1f - Mathf.Exp(-dt / 0.65f));
             smoothedBreath = Mathf.Lerp(smoothedBreath, Mathf.Clamp01(breath), 1f - Mathf.Exp(-dt / 0.55f));
             animationTime += dt * motionSpeed * Mathf.Lerp(0.72f, 1.12f, smoothedEnergy);
+            UpdateFuelHistory(dt, Mathf.Clamp01(energy));
+        }
+
+        void UpdateFuelHistory(float dt, float fuel)
+        {
+            // 根元で生まれた火力の履歴を上へ運ぶ。減衰時に全高を同時に細くしない。
+            float untilTick = FuelInterval - fuelPhase;
+            for(float elapsed=untilTick; elapsed<=dt; elapsed+=FuelInterval)
+            {
+                for(int i=FuelSamples-1;i>0;i--) fuelHistory[i]=fuelHistory[i-1];
+                fuelHistory[0]=Mathf.Lerp(previousFuel,fuel,dt>0?elapsed/dt:1f);
+            }
+            fuelPhase=Mathf.Repeat(fuelPhase+dt,FuelInterval);
+            float phase=fuelPhase/FuelInterval, peak=fuel;
+            for(int i=0;i<FuelSamples;i++)
+            {
+                float value=i==0?fuel:Mathf.Lerp(fuelHistory[i],fuelHistory[i-1],phase);
+                fuelPixels[i]=new Color(value,0,0,1); peak=Mathf.Max(peak,value);
+            }
+            previousFuel=fuel;
+            if(fuelTexture) { fuelTexture.SetPixels(fuelPixels); fuelTexture.Apply(false,false); }
+            if(block!=null) block.SetFloat("_FuelPeak",peak);
+        }
+
+        public float FuelAtAge(float seconds)
+        {
+            float index=Mathf.Clamp(seconds/FuelInterval,0,FuelSamples-1);
+            int lower=Mathf.FloorToInt(index), upper=Mathf.Min(lower+1,FuelSamples-1);
+            return Mathf.Lerp(fuelPixels[lower].r,fuelPixels[upper].r,index-lower);
         }
 
         void ApplyMotion()
@@ -145,6 +188,6 @@ namespace InteractiveBonfire
             tex.SetPixels32(pixels); tex.Apply(false, true);
             return tex;
         }
-        void OnDestroy() { if (noise) Destroy(noise); if(simulation!=null) simulation.Dispose(); }
+        void OnDestroy() { if (noise) Destroy(noise); if(fuelTexture) Destroy(fuelTexture); if(simulation!=null) simulation.Dispose(); }
     }
 }

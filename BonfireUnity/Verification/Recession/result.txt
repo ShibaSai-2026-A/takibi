@@ -1,0 +1,6 @@
+Unity 6000.4.4f1
+GPU NVIDIA GeForce RTX 5060 Laptop GPU
+Fuel-history assertions passed: root stops first; two-second-old fuel survives; tail clears.
+Animation clock stays forward through 26-second controller decay.
+Shader check and 960x540 Editor renders passed; 36 decay frames at 5fps plus 4/8/12/16/20/24/26-second snapshots.
+No live Play, microphone, 1080p60 or projector validation. Visual naturalness requires exhibition review.

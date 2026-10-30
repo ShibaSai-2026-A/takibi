@@ -10,6 +10,45 @@ namespace InteractiveBonfire.Editor
 {
     public static class BonfireValidation
     {
+        public static void Recession()
+        {
+            try
+            {
+                EditorSceneManager.OpenScene("Assets/InteractiveBonfire/Generated/Bonfire.unity");
+                var rig=UnityEngine.Object.FindAnyObjectByType<BonfireBootstrap>();
+                rig.microphoneEnabled=false; rig.Construct(); var c=rig.Controller;
+                const float dt=1f/30f;
+                // 根元が消えた後も、上へ運ばれた履歴が残ることを確認する。
+                c.volume.ResetSimulation();
+                for(int k=0;k<90;k++) c.volume.AdvanceAnimation(dt,1,1);
+                for(int k=0;k<9;k++) c.volume.AdvanceAnimation(dt,0,0);
+                if(c.volume.FuelAtAge(0)>0.001f || c.volume.FuelAtAge(2)<0.99f)
+                    throw new Exception("Fuel must travel upward instead of shrinking simultaneously");
+                for(int k=0;k<150;k++) c.volume.AdvanceAnimation(dt,0,0);
+                if(c.volume.FuelAtAge(4)>0.001f) throw new Exception("Fuel tail did not clear");
+                c.volume.ResetSimulation();
+                for(int k=0;k<210;k++) c.volume.SimulatePreview(dt,1,1,0.9f);
+                Directory.CreateDirectory("Verification/Recession"); c.energy=1;
+                c.fireLight.intensity=3.9f; c.woodMaterial.SetFloat("_Heat",1);
+                Capture(rig,"Recession/maximum",960,540);
+                double clock=c.volume.AnimationTime;
+                for(int k=1;k<=780;k++)
+                {
+                    c.AdvanceEnergy(0,dt); c.volume.SimulatePreview(dt,c.energy,0,0.9f);
+                    if(c.volume.AnimationTime<=clock) throw new Exception("Animation reversed or stopped");
+                    clock=c.volume.AnimationTime;
+                    c.fireLight.intensity=0.18f+c.energy*4;
+                    c.woodMaterial.SetFloat("_Heat",0.18f+c.energy*0.82f);
+                    if(k<=216 && k%6==0) Capture(rig,"Recession/frame-"+(k/6).ToString("D3"),960,540);
+                    if(k%120==0 || k==780) Capture(rig,"Recession/decay-"+(k/30).ToString("D2")+"s",960,540);
+                }
+                if(c.energy>0.004f || c.volume.FuelAtAge(3)>0.004f) throw new Exception("Fire did not settle");
+                if(ShaderUtil.ShaderHasError(Shader.Find("InteractiveBonfire/VolumeFlame"))) throw new Exception("Flame shader error");
+                File.WriteAllText("Verification/Recession/result.txt","Unity "+Application.unityVersion+"\nGPU "+SystemInfo.graphicsDeviceName+"\nFuel-history assertions passed: root stops first; two-second-old fuel survives; tail clears.\nAnimation clock stays forward through 26-second controller decay.\nShader check and 960x540 Editor renders passed; 36 decay frames at 5fps plus 4/8/12/16/20/24/26-second snapshots.\nNo live Play, microphone, 1080p60 or projector validation. Visual naturalness requires exhibition review.\n");
+                EditorApplication.Exit(0);
+            }
+            catch(Exception error) { Debug.LogException(error); EditorApplication.Exit(1); }
+        }
         public static void Motion()
         {
             try
