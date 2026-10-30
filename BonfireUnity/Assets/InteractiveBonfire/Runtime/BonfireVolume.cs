@@ -96,7 +96,11 @@ namespace InteractiveBonfire
         void ApplySimulation()
         {
             block.SetFloat("_UseSimulation",simulation!=null?1f:0f);
-            if(simulation!=null) block.SetTexture("_SimTex",simulation.Texture);
+            if(simulation!=null)
+            {
+                block.SetTexture("_SimTex",simulation.Texture);
+                block.SetTexture("_HeatProfile",simulation.HeatProfile);
+            }
         }
 
         public void AdvanceAnimation(float deltaSeconds, float energy, float breath)

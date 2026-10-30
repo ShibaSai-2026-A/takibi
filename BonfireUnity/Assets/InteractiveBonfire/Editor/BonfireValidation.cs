@@ -21,7 +21,7 @@ namespace InteractiveBonfire.Editor
                 var c=rig.Controller;
                 c.volume.SetFire(1,1,0.9f);
                 c.fireLight.intensity=3.9f; c.woodMaterial.SetFloat("_Heat",1f);
-                const string folder="Verification/NaturalMotion";
+                const string folder="Verification/ShapeRestored";
                 Directory.CreateDirectory(folder);
                 double previous=c.volume.AnimationTime;
                 for(int k=0;k<180;k++)
@@ -37,17 +37,30 @@ namespace InteractiveBonfire.Editor
                 for(int k=0;k<count;k++)
                 {
                     if(k>0) c.volume.SimulatePreview(1f/15f,1f,1f,0.9f);
-                    Capture(rig,"NaturalMotion/frame-"+k.ToString("D3"),960,540);
+                    Capture(rig,"ShapeRestored/frame-"+k.ToString("D3"),960,540);
                 }
                 foreach(float energy in new[]{0.12f,0.35f,0.65f})
                 {
                     c.volume.ResetSimulation();
                     for(int k=0;k<240;k++) c.volume.SimulatePreview(1f/60f,energy,0.8f,0.9f);
                     c.fireLight.intensity=0.18f+energy*4; c.woodMaterial.SetFloat("_Heat",0.18f+energy*0.82f);
-                    Capture(rig,"NaturalMotion/energy-"+Mathf.RoundToInt(energy*100));
+                    Capture(rig,"ShapeRestored/energy-"+Mathf.RoundToInt(energy*100));
                 }
+                c.volume.ResetSimulation(); c.energy=0;
+                for(int k=1;k<=840;k++)
+                {
+                    c.AdvanceEnergy(1f,1f/60f);
+                    c.volume.SimulatePreview(1f/60f,c.energy,1f,0.9f);
+                    if(k==60 || k==180 || k==360 || k==600 || k==840)
+                    {
+                        c.fireLight.intensity=0.18f+c.energy*4;
+                        c.woodMaterial.SetFloat("_Heat",0.18f+c.energy*0.82f);
+                        Capture(rig,"ShapeRestored/growth-"+(k/60).ToString("D2")+"s",960,540);
+                    }
+                }
+                if(c.energy<0.90f) throw new Exception("Slow growth regression");
                 if(ShaderUtil.ShaderHasError(Shader.Find("InteractiveBonfire/VolumeFlame"))) throw new Exception("Flame shader compilation failed");
-                File.WriteAllText(folder+"/result.txt","Unity "+Application.unityVersion+"\nGPU "+SystemInfo.graphicsDeviceName+"\nC# compilation and flame shader check passed.\nAnimation phase remains continuous across energy/breath changes.\nGPU advected density/temperature: 64x96x48 cells, two ARGBHalf textures.\n48 Editor render-request frames at 960x540, 6.5 seconds warm-up then 3.133 seconds advance (15 fps preview).\nAdditional 4-second simulations at energy 0.12, 0.35, 0.65.\nThis is an offline preview; live Play, USB input, 1080p/60fps and projector output remain unverified.\n");
+                File.WriteAllText(folder+"/result.txt","Unity "+Application.unityVersion+"\nGPU "+SystemInfo.graphicsDeviceName+"\nC# compilation and flame shader check passed.\nAnimation phase remains continuous across energy/breath changes.\nGPU advected density/temperature: 64x96x48 cells, two ARGBHalf textures, 96x1 heat arrival profile.\nAppearance: previous procedural silhouette and fine membranes; rise/fade: advected heat arrival.\n48 Editor render-request frames at 960x540, 6.5 seconds warm-up then 3.133 seconds advance (15 fps preview).\nAdditional 4-second simulations at energy 0.12, 0.35, 0.65.\nSlow growth snapshots at 1, 3, 6, 10 and 14 seconds; final energy="+c.energy+".\nThis is an offline preview; live Play, USB input, 1080p/60fps and projector output remain unverified.\n");
                 EditorApplication.Exit(0);
             }
             catch(Exception e) { Debug.LogException(e); EditorApplication.Exit(1); }

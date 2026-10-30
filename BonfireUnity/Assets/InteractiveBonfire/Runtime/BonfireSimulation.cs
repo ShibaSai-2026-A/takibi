@@ -8,19 +8,25 @@ namespace InteractiveBonfire
     {
         const int Width=64, Height=96, Depth=48;
         readonly ComputeShader compute;
-        readonly int clearKernel, stepKernel;
-        RenderTexture current, next;
+        readonly int clearKernel, stepKernel, profileKernel;
+        RenderTexture current, next, heatProfile;
         public RenderTexture Texture => current;
+        public RenderTexture HeatProfile => heatProfile;
 
         public BonfireSimulation(ComputeShader source)
         {
             compute=Object.Instantiate(source);
             clearKernel=compute.FindKernel("Clear"); stepKernel=compute.FindKernel("Advect");
+            profileKernel=compute.FindKernel("BuildHeatProfile");
             try
             {
                 current=CreateTexture("Fire density A"); next=CreateTexture("Fire density B");
+                heatProfile=new RenderTexture(Height,1,0,RenderTextureFormat.ARGBHalf)
+                {name="Fire heat arrival",enableRandomWrite=true,wrapMode=TextureWrapMode.Clamp,filterMode=FilterMode.Bilinear};
+                if(!heatProfile.Create()) throw new System.InvalidOperationException("熱の到達テクスチャを作成できませんでした。");
                 compute.SetInts("_Resolution",Width,Height,Depth);
                 Clear(current); Clear(next);
+                UpdateHeatProfile();
             }
             catch { Dispose(); throw; }
         }
@@ -59,15 +65,24 @@ namespace InteractiveBonfire
                 compute.Dispatch(stepKernel,Width/8,Height/8,Depth/4);
                 var swap=current; current=next; next=swap;
             }
+            UpdateHeatProfile();
         }
 
-        public void Reset() { Clear(current); Clear(next); }
+        void UpdateHeatProfile()
+        {
+            compute.SetTexture(profileKernel,"_Read",current);
+            compute.SetTexture(profileKernel,"_HeatProfileWrite",heatProfile);
+            compute.Dispatch(profileKernel,1,Height,1);
+        }
+
+        public void Reset() { Clear(current); Clear(next); UpdateHeatProfile(); }
 
         public void Dispose()
         {
             if(current) current.Release(); if(next) next.Release();
-            Release(current); Release(next); Release(compute);
-            current=null; next=null;
+            if(heatProfile) heatProfile.Release();
+            Release(current); Release(next); Release(heatProfile); Release(compute);
+            current=null; next=null; heatProfile=null;
         }
         static void Release(Object value)
         {

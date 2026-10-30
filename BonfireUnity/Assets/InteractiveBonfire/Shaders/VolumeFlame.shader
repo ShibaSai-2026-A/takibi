@@ -28,6 +28,7 @@ Shader "InteractiveBonfire/VolumeFlame"
             #include "Packages/com.unity.render-pipelines.universal/ShaderLibrary/DeclareDepthTexture.hlsl"
             TEXTURE3D(_NoiseTex); SAMPLER(sampler_NoiseTex);
             TEXTURE3D(_SimTex); SAMPLER(sampler_SimTex);
+            TEXTURE2D(_HeatProfile); SAMPLER(sampler_HeatProfile);
             CBUFFER_START(UnityPerMaterial)
             float _Energy, _Breath, _Exposure, _Density, _AnimationTime, _MotionStrength, _UseSimulation;
             int _Steps;
@@ -50,22 +51,54 @@ Shader "InteractiveBonfire/VolumeFlame"
             }
             // 時間とともに上昇する連続ノイズ。格子を切り替えない。
             float Turbulence(float3 p) { return N(p) * 0.58 + N(p * 2.07 + 7.3) * 0.28 + N(p * 4.13 - 9.1) * 0.14; }
+            float ShapeNoise(float3 p) { return SAMPLE_TEXTURE3D_LOD(_NoiseTex,sampler_NoiseTex,p/48.0,0).r; }
+            float PreviousAppearance(float3 p,out float heat,out float height)
+            {
+                // 一つ前の細い輪郭・重なり・内部の筋を再現。高さを火力で伸ばす処理は戻さない。
+                float t=_AnimationTime;
+                float3 flow=p*float3(3.7,2.7,4.5)-float3(0.12*t,3.5*t,-0.17*t);
+                float3 warp=float3(ShapeNoise(flow+12.8),ShapeNoise(flow+26.2),ShapeNoise(flow+43.7))-0.5;
+                float rise=saturate((p.y-0.13)/2.7);
+                float3 q=p;
+                q.xz+=warp.xz*(0.13+rise*(0.7+_Breath*0.15))*_MotionStrength;
+                q.x+=sin(p.y*3.9-t*2.2)*rise*0.10*_MotionStrength;
+                float field=0; height=0;
+                [unroll] for(int j=0;j<7;j++)
+                {
+                    float4 s=_Sources[j];
+                    float activation=j==0?smoothstep(0.005,0.12,_Energy):smoothstep(0.10+j*0.035,0.40+j*0.055,_Energy);
+                    float h=2.6*s.w*(0.83+0.24*ShapeNoise(float3(j*6.3,t*1.35,3.1)));
+                    float y=(q.y-s.y)/max(0.05,h);
+                    float gate=smoothstep(-0.04,0.04,y)*(1-smoothstep(0.72,1.02,y));
+                    float r=(0.10+0.115*_Energy)*pow(saturate(1-y),0.72)+0.012;
+                    float2 center=s.xz+float2(sin(y*6-t*1.6+j),cos(y*4.2-t*1.3+j*1.8))*y*y*(0.07+0.12*_Energy)*_MotionStrength;
+                    float2 d=(q.xz-center)/float2(r,r*0.72);
+                    field+=exp(-dot(d,d)*1.65)*gate*activation;
+                    height=max(height,saturate(y)*exp(-dot(d,d)));
+                }
+                float baseBed=exp(-dot(q.xz/float2(0.65,0.32),q.xz/float2(0.65,0.32))*2.4);
+                baseBed*=smoothstep(0.04,0.15,p.y)*(1-smoothstep(0.25,0.55,p.y));
+                field+=baseBed*_Energy*0.26;
+                float3 detailFlow=flow*1.6;
+                float n=ShapeNoise(detailFlow)*0.58+ShapeNoise(detailFlow*2.07+7.3)*0.28+ShapeNoise(detailFlow*4.13-9.1)*0.14;
+                float fine=ShapeNoise(flow*float3(4,1.3,4)+warp*3);
+                float iso=0.19+0.27*n;
+                float body=smoothstep(iso-0.045,iso+0.16,field);
+                float membrane=exp(-abs(field-iso)*5.5)*smoothstep(0.035,0.18,field);
+                float filaments=pow(saturate(1-abs(fine*2-1)),3);
+                heat=saturate(0.20+membrane*0.52+filaments*0.20-height*0.20+(1-rise)*0.14);
+                return (membrane*(0.65+0.35*filaments)+body*0.085)*smoothstep(0.002,0.04,_Energy);
+            }
             float Field(float3 p, out float heat, out float height)
             {
                 if(_UseSimulation>0.5)
                 {
-                    float3 uv=(p-float3(-1.55,-0.15,-1.1))/float3(3.1,3.6,2.2);
-                    float2 gas=SAMPLE_TEXTURE3D_LOD(_SimTex,sampler_SimTex,uv,0).rg;
-                    // グリッドは大きな流れを担当し、細い反応膜は高解像度のノイズで補う。
-                    float3 detailFlow=p*float3(7.5,4.2,8.5)-float3(0.13*_AnimationTime,3.6*_AnimationTime,-0.11*_AnimationTime);
-                    float detail=N(detailFlow)*0.65+N(detailFlow*2.13+17.2)*0.35;
-                    float strands=N(p*float3(17,3.2,19)-float3(0.09*_AnimationTime,2.8*_AnimationTime,0.06*_AnimationTime));
-                    height=saturate((p.y-0.25)/2.5);
-                    heat=saturate(0.12+gas.y*0.68+strands*0.20);
-                    float reaction=smoothstep(0.14,0.29,gas.y*(0.70+detail*0.65));
-                    float tissue=gas.x*(0.50+detail*1.15);
-                    float membrane=exp(-abs(tissue-0.34)*8.0)*smoothstep(0.045,0.19,gas.x);
-                    return (membrane*(0.70+strands*0.30)+gas.x*0.045)*reaction;
+                    // 輪郭と立ち上がりを分離。移流した熱が届いた場所だけ、旧版の見た目で発光する。
+                    float profileY=(0.30+(p.y-0.30)*0.68+0.15)/3.6;
+                    float temperature=SAMPLE_TEXTURE2D_LOD(_HeatProfile,sampler_HeatProfile,float2(profileY,0.5),0).r;
+                    float arrival=smoothstep(0.045,0.17,temperature);
+                    if(arrival<0.001) { heat=0; height=0; return 0; }
+                    return PreviousAppearance(p,heat,height)*arrival;
                 }
                 float t = _AnimationTime;
                 // 高さに対して時間を遅らせ、根元の変化が上部へ運ばれる流れを作る。

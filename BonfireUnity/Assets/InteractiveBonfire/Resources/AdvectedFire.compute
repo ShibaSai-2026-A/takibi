@@ -1,9 +1,11 @@
 #pragma kernel Clear
 #pragma kernel Advect
+#pragma kernel BuildHeatProfile
 
 Texture3D<float4> _Read;
 SamplerState sampler_Read;
 RWTexture3D<float4> _Write;
+RWTexture2D<float4> _HeatProfileWrite;
 int3 _Resolution;
 float _Dt, _Energy, _Breath, _TimeValue, _Turbulence;
 float4 _Sources[7];
@@ -73,4 +75,21 @@ void Advect(uint3 id:SV_DispatchThreadID)
     float boundary=smoothstep(0,0.035,edge)*(1-smoothstep(0.94,1,uv.y));
     state.rg*=boundary;
     _Write[id]=float4(clamp(state.rg,0,1.8),0,0);
+}
+
+groupshared float HeatPeak[64];
+[numthreads(64,1,1)]
+void BuildHeatProfile(uint3 group:SV_GroupID,uint lane:SV_GroupIndex)
+{
+    // 熱が到達した高さをGPUで抽出する。見た目の輪郭とは分離する。
+    float peak=0;
+    for(int z=0;z<_Resolution.z;z++) peak=max(peak,_Read.Load(int4(lane,group.y,z,0)).g);
+    HeatPeak[lane]=peak;
+    GroupMemoryBarrierWithGroupSync();
+    for(uint stride=32;stride>0;stride>>=1)
+    {
+        if(lane<stride) HeatPeak[lane]=max(HeatPeak[lane],HeatPeak[lane+stride]);
+        GroupMemoryBarrierWithGroupSync();
+    }
+    if(lane==0) _HeatProfileWrite[int2(group.y,0)]=float4(HeatPeak[0],0,0,0);
 }
