@@ -26,9 +26,10 @@ static const float Buoyancy=8.5;
 static const float Drag=1.7;
 static const float Confinement=5.5;
 static const float BurnRate=0.16;
-static const float FrontSpeed=0.28;
+static const float FrontSpeed=0.24;
 static const float Cooling=0.85;
 static const float VentSpeed=2.3;
+static const float Expansion=0.45;
 
 float3 CellSize() { return BoxSize/float3(_Resolution); }
 float3 Position(uint3 id) { return BoxMin+(id+0.5)*CellSize(); }
@@ -40,9 +41,9 @@ float3 NoiseAt(float3 coordinate) { return _Noise.SampleLevel(my_linear_repeat_s
 float BedAmount(float3 p)
 {
     if(_Flame<=0) return 0;
-    float2 offset=(p.xz-_BedCenter.xz)/float2(0.78,0.42);
+    float2 offset=(p.xz-_BedCenter.xz)/float2(1.0,0.55);
     float bedY=0.24+0.22*saturate(1-dot(offset,offset));
-    float3 d=float3((p.x-_BedCenter.x)/(0.66*_BedRadius),(p.y-bedY)/0.16,(p.z-_BedCenter.z)/(0.36*_BedRadius));
+    float3 d=float3((p.x-_BedCenter.x)/(0.84*_BedRadius),(p.y-bedY)/0.16,(p.z-_BedCenter.z)/(0.40*_BedRadius));
     float footprint=exp(-dot(d,d)*1.4);
     if(footprint<0.002) return 0;
     float patchNoise=NoiseAt(float3(p.x*3.3,_Drift.y*0.55,p.z*3.3)+_Drift*float3(0.7,0,0.7)+73.0).g;
@@ -114,6 +115,8 @@ void Divergence(uint3 id:SV_DispatchThreadID)
     float d=(At(_Read,c+int3(1,0,0)).x-At(_Read,c-int3(1,0,0)).x)/h.x
         +(At(_Read,c+int3(0,1,0)).y-At(_Read,c-int3(0,1,0)).y)/h.y
         +(At(_Read,c+int3(0,0,1)).z-At(_Read,c-int3(0,0,1)).z)/h.z;
+    // 燃えたガスは膨らむ。火床から外へ押す流れが、吸い込みで炎が細く絞られるのを打ち消す。
+    d-=Expansion*BedAmount(Position(id));
     _Write[id]=float4(d,0,0,0);
 }
 

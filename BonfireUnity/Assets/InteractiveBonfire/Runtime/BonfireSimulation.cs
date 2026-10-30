@@ -101,7 +101,7 @@ namespace InteractiveBonfire
             Bind(vorticity,velocity,aux); Dispatch(vorticity);
             Bind(forces,velocity,velocityNext); compute.SetTexture(forces,"_Aux",aux); compute.SetTexture(forces,"_State",state);
             compute.SetTexture(forces,"_Noise",noise); Dispatch(forces); Swap(ref velocity,ref velocityNext);
-            Bind(divergence,velocity,aux); Dispatch(divergence);
+            Bind(divergence,velocity,aux); compute.SetTexture(divergence,"_Noise",noise); Dispatch(divergence);
             // 前回の圧力から始めるので、少ない反復で済む。
             compute.SetTexture(jacobi,"_Aux",aux);
             for(int k=0;k<PressureIterations;k++) { Bind(jacobi,pressure,pressureNext); Dispatch(jacobi); Swap(ref pressure,ref pressureNext); }
